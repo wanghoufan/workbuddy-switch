@@ -55,3 +55,7 @@ npm/platform/*/bin/
 .grok/
 /.workbuddy/
 /AGENTS.md
+
+# 本机预编译后端二进制与依赖目录（不随仓库分发）
+bin/
+.dev-backend/

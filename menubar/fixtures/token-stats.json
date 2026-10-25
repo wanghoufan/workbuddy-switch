@@ -1,0 +1,77 @@
+{
+  "generatedAt": 1792962000000,
+  "rangeDays": null,
+  "sources": [
+    {
+      "source": "workbuddy",
+      "summary": {
+        "total": 12345678,
+        "input": 12000000,
+        "output": 345678,
+        "cacheRead": 11000000,
+        "cacheWrite": 0,
+        "records": 42,
+        "cacheHitRate": 0.9166666666666666
+      },
+      "daily": [
+        {
+          "key": "__TODAY__",
+          "total": 12345678,
+          "input": 12000000,
+          "output": 345678,
+          "cacheRead": 11000000,
+          "cacheWrite": 0,
+          "records": 42,
+          "cacheHitRate": 0.9166666666666666
+        },
+        {
+          "key": "2000-01-01",
+          "total": 99999999,
+          "input": 99999999,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "records": 1,
+          "cacheHitRate": 0
+        }
+      ]
+    },
+    {
+      "source": "codebuddy-cli",
+      "summary": {
+        "total": 900000,
+        "input": 890000,
+        "output": 10000,
+        "cacheRead": 445000,
+        "cacheWrite": 0,
+        "records": 7,
+        "cacheHitRate": 0.5
+      },
+      "daily": [
+        {
+          "key": "__TODAY__",
+          "total": 900000,
+          "input": 890000,
+          "output": 10000,
+          "cacheRead": 445000,
+          "cacheWrite": 0,
+          "records": 7,
+          "cacheHitRate": 0.5
+        }
+      ]
+    },
+    {
+      "source": "codebuddy-ide",
+      "summary": {
+        "total": 0,
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "records": 0,
+        "cacheHitRate": null
+      },
+      "daily": []
+    }
+  ]
+}
