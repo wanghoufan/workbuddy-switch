@@ -37,6 +37,30 @@
       ]
     },
     {
+      "source": "workbuddy-ai",
+      "summary": {
+        "total": 5000000,
+        "input": 4500000,
+        "output": 500000,
+        "cacheRead": 4000000,
+        "cacheWrite": 0,
+        "records": 9,
+        "cacheHitRate": 0.8888888888888888
+      },
+      "daily": [
+        {
+          "key": "__TODAY__",
+          "total": 5000000,
+          "input": 4500000,
+          "output": 500000,
+          "cacheRead": 4000000,
+          "cacheWrite": 0,
+          "records": 9,
+          "cacheHitRate": 0.8888888888888888
+        }
+      ]
+    },
+    {
       "source": "codebuddy-cli",
       "summary": {
         "total": 900000,

@@ -60,32 +60,15 @@ enum TokenAPIError: LocalizedError {
     }
 }
 
-enum TokenAPI {
-    static let defaultEndpoint = "http://127.0.0.1:57890/api/token-stats"
-    static let console = URL(string: "http://127.0.0.1:57890/")!
-
-    /// `WB_TOKEN_API` 仅用于测试与隔离验证，生产不设置该变量。
-    static var endpoint: URL {
-        if let raw = ProcessInfo.processInfo.environment["WB_TOKEN_API"],
-           let url = URL(string: raw) {
-            return url
-        }
-        return URL(string: defaultEndpoint)!
-    }
-
-    static func fetchSync(timeout: TimeInterval = 20) throws -> TokenStatsResponse {
-        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
-        var items = components?.queryItems ?? []
-        items.append(URLQueryItem(name: "days", value: "1"))
-        components?.queryItems = items
-        guard let url = components?.url else { throw TokenAPIError.unreachable }
-
+enum HTTPClient {
+    /// 同步 GET；菜单栏的刷新在后台线程调用，避免把 URLSession 回调塞回主线程。
+    static func get(_ url: URL, timeout: TimeInterval) throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
         let semaphore = DispatchSemaphore(value: 0)
-        var result: Result<TokenStatsResponse, Error> = .failure(TokenAPIError.unreachable)
+        var result: Result<Data, Error> = .failure(TokenAPIError.unreachable)
         URLSession.shared.dataTask(with: request) { data, response, error in
             defer { semaphore.signal() }
             if let error {
@@ -104,14 +87,353 @@ enum TokenAPI {
                 result = .failure(TokenAPIError.unreachable)
                 return
             }
-            do {
-                result = .success(try JSONDecoder().decode(TokenStatsResponse.self, from: data))
-            } catch {
-                result = .failure(error)
-            }
+            result = .success(data)
         }.resume()
         _ = semaphore.wait(timeout: .now() + timeout + 5)
         return try result.get()
+    }
+}
+
+enum TokenAPI {
+    static let defaultEndpoint = "http://127.0.0.1:57890/api/token-stats"
+    static let console = URL(string: "http://127.0.0.1:57890/")!
+
+    /// `WB_TOKEN_API` 仅用于测试与隔离验证，生产不设置该变量。
+    static var endpoint: URL {
+        if let raw = ProcessInfo.processInfo.environment["WB_TOKEN_API"],
+           let url = URL(string: raw) {
+            return url
+        }
+        return URL(string: defaultEndpoint)!
+    }
+
+    /// 同端口下其它只读接口（`/api/accounts`）的根地址。
+    static var baseURL: URL {
+        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+        components?.path = ""
+        components?.query = nil
+        components?.fragment = nil
+        return components?.url ?? URL(string: "http://127.0.0.1:57890")!
+    }
+
+    static func fetchSync(timeout: TimeInterval = 20) throws -> TokenStatsResponse {
+        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+        var items = components?.queryItems ?? []
+        items.append(URLQueryItem(name: "days", value: "1"))
+        components?.queryItems = items
+        guard let url = components?.url else { throw TokenAPIError.unreachable }
+
+        let data = try HTTPClient.get(url, timeout: timeout)
+        return try JSONDecoder().decode(TokenStatsResponse.self, from: data)
+    }
+}
+
+// MARK: - 当前账号
+
+struct WorkbuddyAccountsResponse: Decodable {
+    let accounts: [WorkbuddyAccount]
+    let current: String?
+}
+
+struct WorkbuddyAccount: Decodable {
+    let id: String?
+    let uid: String?
+    let nickname: String?
+}
+
+struct WorkbuddyAccountContext {
+    /// 账号库里的 id，用来查「这个账号有哪些会话」。
+    let id: String
+    let uid: String
+    /// 手机号前三位（133 / 166 / 199）。
+    let prefix: String
+}
+
+enum AccountAPI {
+    /// 当前 WorkBuddy 账号：id、uid、手机号前三位。
+    /// 只读本机服务的账号列表，不落盘、不写日志；取不到时返回 nil。
+    static func currentContext() -> WorkbuddyAccountContext? {
+        do {
+            let url = TokenAPI.baseURL.appendingPathComponent("api/accounts")
+            let data = try HTTPClient.get(url, timeout: 5)
+            let response = try JSONDecoder().decode(WorkbuddyAccountsResponse.self, from: data)
+            guard let current = response.current,
+                  let account = response.accounts.first(where: { $0.id == current || $0.uid == current }),
+                  let id = account.id,
+                  let uid = account.uid,
+                  let nickname = account.nickname else { return nil }
+            let digits = nickname.filter { $0.isNumber }
+            guard digits.count >= 3 else { return nil }
+            return WorkbuddyAccountContext(id: id, uid: uid, prefix: String(digits.prefix(3)))
+        } catch {
+            return nil
+        }
+    }
+}
+
+// MARK: - 当前账号的今日 WorkBuddy 用量（本地日志按会话归属）
+
+struct WorkbuddySessionsResponse: Decodable {
+    let sessions: [WorkbuddySessionRecord]
+}
+
+struct WorkbuddySessionRecord: Decodable {
+    let id: String?
+}
+
+enum SessionsAPI {
+    /// 当前账号在 WorkBuddy 里的会话 id 集合。日志文件按会话归属到账号，
+    /// 这样就不需要从日志正文里猜账号，也不会把其他账号的用量算进来。
+    static func workbuddySessionIds(accountId: String) -> Set<String>? {
+        do {
+            var components = URLComponents(
+                url: TokenAPI.baseURL.appendingPathComponent("api/sessions/account"),
+                resolvingAgainstBaseURL: false
+            )
+            components?.queryItems = [
+                URLQueryItem(name: "accountId", value: accountId),
+                URLQueryItem(name: "client", value: "workbuddy"),
+            ]
+            guard let url = components?.url else { return nil }
+            let data = try HTTPClient.get(url, timeout: 10)
+            let response = try JSONDecoder().decode(WorkbuddySessionsResponse.self, from: data)
+            return Set(response.sessions.compactMap { $0.id })
+        } catch {
+            return nil
+        }
+    }
+}
+
+struct WorkbuddyUsageSnapshot {
+    let day: String
+    let prefix: String
+    let total: Int
+    let updatedAt: Date
+}
+
+enum WorkbuddyUsageError: LocalizedError {
+    case noAccount
+    case noSessions
+
+    var errorDescription: String? {
+        switch self {
+        case .noAccount: return "无法确定当前 WorkBuddy 账号"
+        case .noSessions: return "无法读取当前账号的会话列表"
+        }
+    }
+}
+
+enum WorkbuddyUsageProvider {
+    static func fetch(now: Date = Date()) throws -> WorkbuddyUsageSnapshot {
+        guard let context = AccountAPI.currentContext() else { throw WorkbuddyUsageError.noAccount }
+        guard let sessions = SessionsAPI.workbuddySessionIds(accountId: context.id) else {
+            throw WorkbuddyUsageError.noSessions
+        }
+        let total = WorkbuddyLogUsage.todayTotal(sessionIds: sessions, now: now)
+        return WorkbuddyUsageSnapshot(
+            day: DayKey.today(now),
+            prefix: context.prefix,
+            total: total,
+            updatedAt: now
+        )
+    }
+}
+
+/// 直接读本机 WorkBuddy 日志，只统计「当前账号的会话、今天」的 Token 总量。
+/// 服务端的 `/api/token-stats` 是三个账号共同的日志目录汇总，没有账号维度；
+/// 这里用 `/api/sessions/account` 给出的会话 id 做归属，再按与服务端相同的口径
+/// （input 已含缓存读取，追加 output 与 cache write）求和。
+enum WorkbuddyLogUsage {
+    private struct Usage {
+        let input: Int
+        let output: Int
+        let read: Int
+        let write: Int
+    }
+
+    private static let cacheWriteKeys = [
+        "cache_write_input_tokens",
+        "cacheWriteInputTokens",
+        "cache_creation_input_tokens",
+        "prompt_cache_write_tokens",
+    ]
+
+    static func todayTotal(sessionIds: Set<String>, now: Date = Date(), root: URL? = nil) -> Int {
+        let day = DayKey.today(now)
+        let startOfDay = Calendar.current.startOfDay(for: now)
+        let envRoot = ProcessInfo.processInfo.environment["WB_WORKBUDDY_ROOT"]
+        let workbuddyRoot = root
+            ?? envRoot.map { URL(fileURLWithPath: $0) }
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".workbuddy")
+        let projects = workbuddyRoot.appendingPathComponent("projects")
+
+        var files: [(url: URL, modified: Date)] = []
+        if let enumerator = FileManager.default.enumerator(
+            at: projects,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator {
+                guard url.pathExtension == "jsonl" else { continue }
+                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+                guard values?.isRegularFile ?? false,
+                      let modified = values?.contentModificationDate,
+                      modified >= startOfDay else { continue }
+                files.append((url, modified))
+            }
+        }
+        // 与服务端一致：旧文件先处理，复制/分叉会话的重放记录只算一次。
+        files.sort { $0.modified < $1.modified }
+
+        var seen = Set<String>()
+        var total = 0
+        for file in files {
+            guard sessionId(for: file.url, known: sessionIds) != nil else { continue }
+            total += todayTotal(in: file.url, day: day, seen: &seen)
+        }
+        return total
+    }
+
+    private static func sessionId(for url: URL, known: Set<String>) -> String? {
+        let stem = url.deletingPathExtension().lastPathComponent
+        if known.contains(stem) { return stem }
+        // 子代理日志在 <session>/subagents/... 下，向上找到当前账号的会话目录。
+        var directory = url.deletingLastPathComponent()
+        for _ in 0..<4 {
+            let name = directory.lastPathComponent
+            if known.contains(name) { return name }
+            let parent = directory.deletingLastPathComponent()
+            if parent.path == directory.path { break }
+            directory = parent
+        }
+        return nil
+    }
+
+    private static func todayTotal(in url: URL, day: String, seen: inout Set<String>) -> Int {
+        guard let data = try? Data(contentsOf: url) else { return 0 }
+        let marker = Data("\"usage\"".utf8)
+        var total = 0
+        for line in data.split(separator: UInt8(ascii: "\n")) {
+            guard line.range(of: marker) != nil else { continue }
+            guard let raw = try? JSONSerialization.jsonObject(with: Data(line)),
+                  let object = raw as? [String: Any],
+                  let usage = usage(from: object),
+                  let timestamp = timestamp(from: object),
+                  dayKey(ms: timestamp) == day else { continue }
+            let fingerprint = "\(timestamp)|\(usage.input)|\(usage.output)|\(usage.read)|\(usage.write)|\(model(from: object))"
+            guard seen.insert(fingerprint).inserted else { continue }
+            total += usage.input + usage.output + usage.write
+        }
+        return total
+    }
+
+    private static func dayKey(ms: Int64) -> String {
+        let components = Calendar.current.dateComponents(
+            [.year, .month, .day],
+            from: Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        )
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber { return number.intValue }
+        if let text = value as? String { return Int(text.trimmingCharacters(in: .whitespaces)) }
+        return nil
+    }
+
+    private static func field(_ object: [String: Any], _ keys: [String]) -> Int? {
+        for key in keys {
+            if let value = intValue(object[key]) { return value }
+        }
+        return nil
+    }
+
+    private static func positiveField(_ object: [String: Any], _ keys: [String]) -> Int? {
+        for key in keys {
+            if let value = intValue(object[key]), value > 0 { return value }
+        }
+        return nil
+    }
+
+    private static func cachedInput(_ object: [String: Any]) -> Int {
+        let keys = [
+            "cache_read_input_tokens",
+            "cacheReadInputTokens",
+            "prompt_cache_hit_tokens",
+            "cached_tokens",
+        ]
+        if let value = positiveField(object, keys) { return value }
+        if let details = object["prompt_tokens_details"] as? [String: Any],
+           let value = positiveField(details, ["cached_tokens"]) {
+            return value
+        }
+        if let details = object["inputTokensDetails"] as? [[String: Any]] {
+            for detail in details {
+                if let value = positiveField(detail, ["cached_tokens"]) { return value }
+            }
+        }
+        return 0
+    }
+
+    private static func usage(from value: [String: Any]) -> Usage? {
+        let provider = value["providerData"] as? [String: Any]
+        var candidates: [[String: Any]] = []
+        if let message = value["message"] as? [String: Any],
+           let usage = message["usage"] as? [String: Any] {
+            candidates.append(usage)
+        }
+        if let usage = provider?["usage"] as? [String: Any] {
+            candidates.append(usage)
+        }
+        if let usage = value["usage"] as? [String: Any] {
+            candidates.append(usage)
+        }
+        let inputKeys = ["input_tokens", "inputTokens", "prompt_tokens"]
+        guard let selected = candidates.first(where: { field($0, inputKeys) != nil }) else { return nil }
+
+        var write = positiveField(selected, cacheWriteKeys) ?? 0
+        if write == 0 {
+            var others = candidates
+            if let raw = provider?["rawUsage"] as? [String: Any] { others.append(raw) }
+            for object in others {
+                if let value = positiveField(object, cacheWriteKeys), value > 0 {
+                    write = value
+                    break
+                }
+            }
+        }
+        return Usage(
+            input: field(selected, inputKeys) ?? 0,
+            output: field(selected, ["output_tokens", "outputTokens", "completion_tokens"]) ?? 0,
+            read: cachedInput(selected),
+            write: write
+        )
+    }
+
+    private static func timestamp(from value: [String: Any]) -> Int64? {
+        for key in ["timestamp", "ts"] {
+            if let number = value[key] as? NSNumber { return number.int64Value }
+            if let text = value[key] as? String,
+               let parsed = Int64(text.trimmingCharacters(in: .whitespaces)) {
+                return parsed
+            }
+        }
+        return nil
+    }
+
+    private static func model(from value: [String: Any]) -> String {
+        if let provider = value["providerData"] as? [String: Any],
+           let model = provider["model"] as? String,
+           !model.isEmpty {
+            return model
+        }
+        if let model = value["model"] as? String, !model.isEmpty { return model }
+        return "未知模型"
     }
 }
 
@@ -153,6 +475,14 @@ enum NumberFormat {
     }
 }
 
+enum MenuTitle {
+    /// `work-<账号前缀>-446.7M`；账号前缀取不到时退回 `work-446.7M`。
+    static func make(prefix: String?, value: String, compact: Bool) -> String {
+        let body = prefix.map { "\($0)-\(value)" } ?? value
+        return compact ? body : "work-\(body)"
+    }
+}
+
 enum DisplaySource: String, CaseIterable {
     case workbuddy
     case codebuddyCLI = "codebuddy-cli"
@@ -187,6 +517,12 @@ enum RefreshInterval: Int, CaseIterable {
     }
 }
 
+/// 提醒阈值候选（百万 Token），0 表示关闭。
+/// 与菜单项共用这一份数据，`--print-once` 也会输出，便于夹具回归核对。
+enum ThresholdChoices {
+    static let million: [Double] = [0, 30, 50, 90, 120, 150, 180, 300, 500]
+}
+
 struct TokenSnapshot {
     let day: String
     let bySource: [String: DailyUsage]
@@ -203,23 +539,28 @@ struct TokenSnapshot {
         return TokenSnapshot(day: day, bySource: bySource, updatedAt: date)
     }
 
+    /// 菜单「三产品合计」只累加菜单里列出的三个来源。
+    /// 后端还会返回 WorkBuddy 国际版（`workbuddy-ai`），两者账号体系不同，
+    /// 菜单栏不单列、也不并入合计（避免「三产品」实际算出四项）。
+    private static let productSources: [DisplaySource] = [.workbuddy, .codebuddyCLI, .codebuddyIDE]
+
     func total(for source: DisplaySource) -> Int {
         switch source {
-        case .all: return bySource.values.reduce(0) { $0 + $1.total }
+        case .all: return Self.productSources.reduce(0) { $0 + (bySource[$1.rawValue]?.total ?? 0) }
         default: return bySource[source.rawValue]?.total ?? 0
         }
     }
 
     func input(for source: DisplaySource) -> Int {
         switch source {
-        case .all: return bySource.values.reduce(0) { $0 + $1.input }
+        case .all: return Self.productSources.reduce(0) { $0 + (bySource[$1.rawValue]?.input ?? 0) }
         default: return bySource[source.rawValue]?.input ?? 0
         }
     }
 
     func output(for source: DisplaySource) -> Int {
         switch source {
-        case .all: return bySource.values.reduce(0) { $0 + $1.output }
+        case .all: return Self.productSources.reduce(0) { $0 + (bySource[$1.rawValue]?.output ?? 0) }
         default: return bySource[source.rawValue]?.output ?? 0
         }
     }
@@ -228,7 +569,7 @@ struct TokenSnapshot {
         if case .all = source {
             let input = input(for: .all)
             guard input > 0 else { return nil }
-            let read = bySource.values.reduce(0) { $0 + $1.cacheRead }
+            let read = Self.productSources.reduce(0) { $0 + (bySource[$1.rawValue]?.cacheRead ?? 0) }
             return Double(read) / Double(input)
         }
         return bySource[source.rawValue]?.cacheHitRate
@@ -240,7 +581,6 @@ struct TokenSnapshot {
 @MainActor
 final class MenuController: NSObject {
     private enum Keys {
-        static let source = "displaySource"
         static let interval = "refreshInterval"
         static let compact = "compactTitle"
         static let threshold = "alertThresholdMillion"
@@ -251,30 +591,20 @@ final class MenuController: NSObject {
     private let menu = NSMenu()
 
     private let headerItem = NSMenuItem()
-    private let detailItem = NSMenuItem()
     private let errorItem = NSMenuItem()
     private let updatedItem = NSMenuItem()
-    private let sourceMenu = NSMenu()
     private var thresholdItem: NSMenuItem?
     private let intervalMenu = NSMenu()
     private let thresholdMenu = NSMenu()
 
     /// 可选阈值（百万 Token），0 表示关闭提醒。
-    private let thresholdChoices: [Double] = [0, 30, 50, 90, 120]
+    private let thresholdChoices = ThresholdChoices.million
 
-    private var snapshot: TokenSnapshot?
+    private var usage: WorkbuddyUsageSnapshot?
     private var errorText: String?
     private var isFetching = false
     private var timer: Timer?
     private let notifier = BannerNotifier()
-
-    private var displaySource: DisplaySource {
-        didSet {
-            UserDefaults.standard.set(displaySource.rawValue, forKey: Keys.source)
-            render()
-            refresh()
-        }
-    }
 
     private var interval: RefreshInterval {
         didSet {
@@ -301,7 +631,6 @@ final class MenuController: NSObject {
 
     override init() {
         let defaults = UserDefaults.standard
-        displaySource = DisplaySource(rawValue: defaults.string(forKey: Keys.source) ?? "") ?? .workbuddy
         let stored = defaults.object(forKey: Keys.interval) as? Int
         interval = RefreshInterval(rawValue: stored ?? RefreshInterval.sixty.rawValue) ?? .sixty
         compactTitle = defaults.bool(forKey: Keys.compact)
@@ -326,15 +655,8 @@ final class MenuController: NSObject {
     // MARK: menu
 
     private func buildMenu() {
-        for item in [headerItem, detailItem, errorItem, updatedItem] {
+        for item in [headerItem, errorItem, updatedItem] {
             item.isEnabled = false
-        }
-
-        for (index, source) in DisplaySource.allCases.enumerated() {
-            let item = NSMenuItem(title: source.label, action: #selector(selectSource(_:)), keyEquivalent: "")
-            item.tag = index
-            item.target = self
-            sourceMenu.addItem(item)
         }
 
         for (index, value) in RefreshInterval.allCases.enumerated() {
@@ -352,8 +674,6 @@ final class MenuController: NSObject {
             thresholdMenu.addItem(item)
         }
 
-        let sourceItem = NSMenuItem(title: "显示口径", action: nil, keyEquivalent: "")
-        sourceItem.submenu = sourceMenu
         let intervalItem = NSMenuItem(title: "刷新间隔", action: nil, keyEquivalent: "")
         intervalItem.submenu = intervalMenu
         thresholdItem = NSMenuItem(title: "提醒阈值", action: nil, keyEquivalent: "")
@@ -367,16 +687,14 @@ final class MenuController: NSObject {
         quit.target = self
 
         menu.addItem(headerItem)
-        menu.addItem(detailItem)
         menu.addItem(errorItem)
         menu.addItem(.separator())
-        menu.addItem(sourceItem)
         menu.addItem(intervalItem)
         if let thresholdItem { menu.addItem(thresholdItem) }
         menu.addItem(.separator())
         menu.addItem(refreshNow)
         menu.addItem(openConsole)
-        let compactItem = NSMenuItem(title: "紧凑标签（只显示数字）", action: #selector(toggleCompact), keyEquivalent: "t")
+        let compactItem = NSMenuItem(title: "紧凑标签（省略 work- 前缀）", action: #selector(toggleCompact), keyEquivalent: "t")
         compactItem.target = self
         menu.addItem(compactItem)
         menu.addItem(updatedItem)
@@ -386,35 +704,23 @@ final class MenuController: NSObject {
 
     private func render() {
         var overThreshold = false
-        if let snapshot {
-            let total = snapshot.total(for: displaySource)
-            overThreshold = thresholdMillion > 0 && Double(total) >= thresholdMillion * 1_000_000
-            setStatusTitle(menuBarTitle(NumberFormat.compact(total)), overThreshold: overThreshold)
-            headerItem.title = "今日 \(displaySource.label) \(NumberFormat.compact(snapshot.total(for: displaySource)))"
-            detailItem.title = "输入 \(NumberFormat.compact(snapshot.input(for: displaySource)))"
-                + " · 输出 \(NumberFormat.compact(snapshot.output(for: displaySource)))"
-                + " · 缓存命中 \(NumberFormat.percent(snapshot.cacheHitRate(for: displaySource)))"
-            updatedItem.title = "更新于 \(NumberFormat.time(snapshot.updatedAt))"
+        if let usage {
+            overThreshold = thresholdMillion > 0 && Double(usage.total) >= thresholdMillion * 1_000_000
+            let compact = NumberFormat.compact(usage.total)
+            setStatusTitle(menuBarTitle(compact), overThreshold: overThreshold)
+            headerItem.title = "今日 WorkBuddy（账号 \(usage.prefix)…） \(compact)"
+            updatedItem.title = "更新于 \(NumberFormat.time(usage.updatedAt))"
             statusItem.button?.toolTip = headerItem.title
         } else {
             setStatusTitle(menuBarTitle(errorText == nil ? "…" : "—"), overThreshold: false)
-            headerItem.title = errorText == nil ? "正在读取 Token 统计…" : "无法读取 Token 统计"
-            detailItem.title = ""
+            headerItem.title = errorText == nil ? "正在读取 WorkBuddy 用量…" : "无法读取 WorkBuddy 用量"
             updatedItem.title = ""
-            statusItem.button?.toolTip = errorText ?? "正在读取 Token 统计"
+            statusItem.button?.toolTip = errorText ?? "正在读取 WorkBuddy 用量"
         }
 
         errorItem.title = errorText.map { "刷新失败：\($0)" } ?? ""
         errorItem.isHidden = errorText == nil
-        detailItem.isHidden = detailItem.title.isEmpty
         updatedItem.isHidden = updatedItem.title.isEmpty
-
-        for (index, source) in DisplaySource.allCases.enumerated() where index < sourceMenu.items.count {
-            sourceMenu.items[index].title = snapshot.map {
-                "\(source.label) \(NumberFormat.compact($0.total(for: source)))"
-            } ?? source.label
-            sourceMenu.items[index].state = source == displaySource ? .on : .off
-        }
 
         for (index, value) in RefreshInterval.allCases.enumerated() where index < intervalMenu.items.count {
             intervalMenu.items[index].state = value == interval ? .on : .off
@@ -427,8 +733,8 @@ final class MenuController: NSObject {
 
         compactMenuState()
 
-        if overThreshold, let snapshot {
-            maybeAlert(total: snapshot.total(for: displaySource))
+        if overThreshold, let usage {
+            maybeAlert(total: usage.total)
         }
     }
 
@@ -446,21 +752,23 @@ final class MenuController: NSObject {
         )
     }
 
-    /// 同一天、同一口径、同一阈值只提醒一次；跨天或改阈值会重新提醒。
+    /// 同一天、同一账号、同一阈值只提醒一次；跨天或改阈值会重新提醒。
     private func maybeAlert(total: Int) {
         let day = DayKey.today()
-        let key = "\(displaySource.rawValue)|\(day)|\(Int(thresholdMillion))"
+        let prefix = usage?.prefix ?? "-"
+        let key = "workbuddy|\(prefix)|\(day)|\(Int(thresholdMillion))"
         guard UserDefaults.standard.string(forKey: Keys.lastAlert) != key else { return }
         UserDefaults.standard.set(key, forKey: Keys.lastAlert)
 
+        let account = usage.map { "（账号 \($0.prefix)…）" } ?? ""
         notifier.show(
-            title: "今日 \(displaySource.label) Token 已达 \(NumberFormat.compact(total))",
+            title: "今日 WorkBuddy\(account) Token 已达 \(NumberFormat.compact(total))",
             body: "提醒阈值 \(Int(thresholdMillion))M，可在菜单「提醒阈值」里调整或关闭。"
         )
     }
 
     private func menuBarTitle(_ value: String) -> String {
-        compactTitle ? value : "work-\(value)"
+        MenuTitle.make(prefix: usage?.prefix, value: value, compact: compactTitle)
     }
 
     @objc private func toggleCompact() {
@@ -472,11 +780,6 @@ final class MenuController: NSObject {
         for item in menu.items where item.action == #selector(toggleCompact) {
             item.state = compactTitle ? .on : .off
         }
-    }
-
-    @objc private func selectSource(_ sender: NSMenuItem) {
-        guard sender.tag >= 0, sender.tag < DisplaySource.allCases.count else { return }
-        displaySource = DisplaySource.allCases[sender.tag]
     }
 
     @objc private func selectInterval(_ sender: NSMenuItem) {
@@ -507,10 +810,10 @@ final class MenuController: NSObject {
         guard !isFetching else { return }
         isFetching = true
         Task { [weak self] in
-            let outcome: Result<TokenStatsResponse, Error>
+            let outcome: Result<WorkbuddyUsageSnapshot, Error>
             do {
                 outcome = .success(try await Task.detached(priority: .utility) {
-                    try TokenAPI.fetchSync()
+                    try WorkbuddyUsageProvider.fetch()
                 }.value)
             } catch {
                 outcome = .failure(error)
@@ -518,8 +821,8 @@ final class MenuController: NSObject {
             guard let self else { return }
             self.isFetching = false
             switch outcome {
-            case .success(let response):
-                self.snapshot = TokenSnapshot.make(from: response)
+            case .success(let usage):
+                self.usage = usage
                 self.errorText = nil
             case .failure(let error):
                 self.errorText = error.localizedDescription
@@ -675,11 +978,33 @@ enum CLI {
                     "cacheHitRate": usage?.cacheHitRate.map { $0 } ?? NSNull(),
                 ]
             }
+            let local: WorkbuddyUsageSnapshot?
+            let localError: String?
+            do {
+                local = try WorkbuddyUsageProvider.fetch()
+                localError = nil
+            } catch {
+                local = nil
+                localError = error.localizedDescription
+            }
             let payload: [String: Any] = [
                 "date": snapshot.day,
                 "generatedAt": response.generatedAt ?? 0,
                 "all": snapshot.total(for: .all),
                 "sources": sources,
+                "thresholdChoices": ThresholdChoices.million,
+                // API 是三账号汇总，仅用于回归；标题取当前账号的本地日志统计。
+                "workbuddy": snapshot.total(for: .workbuddy),
+                "accountPrefix": local?.prefix ?? NSNull(),
+                "localWorkbuddy": local?.total ?? NSNull(),
+                "localError": localError ?? NSNull(),
+                "title": local.map {
+                    MenuTitle.make(
+                        prefix: $0.prefix,
+                        value: NumberFormat.compact($0.total),
+                        compact: false
+                    )
+                } ?? NSNull(),
             ]
             let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .prettyPrinted])
             FileHandle.standardOutput.write(data)

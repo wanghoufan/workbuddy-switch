@@ -1,0 +1,21 @@
+{
+  "accounts": [
+    {
+      "id": "acc-a",
+      "uid": "uid-a",
+      "nickname": "77700000003"
+    },
+    {
+      "id": "acc-b",
+      "uid": "uid-b",
+      "nickname": "88800000002"
+    },
+    {
+      "id": "acc-current",
+      "uid": "uid-current",
+      "nickname": "99900000001"
+    }
+  ],
+  "current": "uid-current",
+  "variant": "cn"
+}

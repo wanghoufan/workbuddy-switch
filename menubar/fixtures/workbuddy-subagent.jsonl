@@ -1,0 +1,1 @@
+{"timestamp":__TODAY_MS__,"type":"message","providerData":{"model":"fixture-model","usage":{"input_tokens":450000,"output_tokens":50000,"cache_read_input_tokens":300000}}}
