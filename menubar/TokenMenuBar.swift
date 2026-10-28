@@ -206,43 +206,26 @@ enum SessionsAPI {
 
 struct WorkbuddyUsageSnapshot {
     let day: String
-    let prefix: String
+    let label: String
     let total: Int
     let updatedAt: Date
 }
 
-enum WorkbuddyUsageError: LocalizedError {
-    case noAccount
-    case noSessions
-
-    var errorDescription: String? {
-        switch self {
-        case .noAccount: return "无法确定当前 WorkBuddy 账号"
-        case .noSessions: return "无法读取当前账号的会话列表"
-        }
-    }
-}
-
 enum WorkbuddyUsageProvider {
-    static func fetch(now: Date = Date()) throws -> WorkbuddyUsageSnapshot {
-        guard let context = AccountAPI.currentContext() else { throw WorkbuddyUsageError.noAccount }
-        guard let sessions = SessionsAPI.workbuddySessionIds(accountId: context.id) else {
-            throw WorkbuddyUsageError.noSessions
-        }
-        let total = WorkbuddyLogUsage.todayTotal(sessionIds: sessions, now: now)
-        return WorkbuddyUsageSnapshot(
+    /// 三个 WorkBuddy 账号今天的合计（当前菜单栏口径）。
+    static func fetch(now: Date = Date()) -> WorkbuddyUsageSnapshot {
+        WorkbuddyUsageSnapshot(
             day: DayKey.today(now),
-            prefix: context.prefix,
-            total: total,
+            label: "总额度",
+            total: WorkbuddyLogUsage.todayTotal(now: now),
             updatedAt: now
         )
     }
 }
 
-/// 直接读本机 WorkBuddy 日志，只统计「当前账号的会话、今天」的 Token 总量。
-/// 服务端的 `/api/token-stats` 是三个账号共同的日志目录汇总，没有账号维度；
-/// 这里用 `/api/sessions/account` 给出的会话 id 做归属，再按与服务端相同的口径
-/// （input 已含缓存读取，追加 output 与 cache write）求和。
+/// 直接读本机 WorkBuddy 日志，统计今天三个账号的 Token 合计。
+/// 口径：input 已含缓存读取，追加 output 与 cache write；复制/分叉会话按指纹去重。
+/// 仍保留按会话过滤的参数，便于以后恢复「只看当前账号」。
 enum WorkbuddyLogUsage {
     private struct Usage {
         let input: Int
@@ -258,7 +241,7 @@ enum WorkbuddyLogUsage {
         "prompt_cache_write_tokens",
     ]
 
-    static func todayTotal(sessionIds: Set<String>, now: Date = Date(), root: URL? = nil) -> Int {
+    static func todayTotal(sessionIds: Set<String>? = nil, now: Date = Date(), root: URL? = nil) -> Int {
         let day = DayKey.today(now)
         let startOfDay = Calendar.current.startOfDay(for: now)
         let envRoot = ProcessInfo.processInfo.environment["WB_WORKBUDDY_ROOT"]
@@ -288,7 +271,7 @@ enum WorkbuddyLogUsage {
         var seen = Set<String>()
         var total = 0
         for file in files {
-            guard sessionId(for: file.url, known: sessionIds) != nil else { continue }
+            if let sessionIds, sessionId(for: file.url, known: sessionIds) == nil { continue }
             total += todayTotal(in: file.url, day: day, seen: &seen)
         }
         return total
@@ -462,6 +445,11 @@ enum NumberFormat {
         return "\(value)"
     }
 
+    /// 紧凑模式：整数百万、小写 m（例如 364m）。
+    static func wholeM(_ value: Int) -> String {
+        "\(Int((Double(value) / 1_000_000).rounded()))m"
+    }
+
     static func percent(_ ratio: Double?) -> String {
         guard let ratio, ratio.isFinite else { return "—" }
         return String(format: "%.1f%%", ratio * 100)
@@ -476,9 +464,9 @@ enum NumberFormat {
 }
 
 enum MenuTitle {
-    /// `work-<账号前缀>-446.7M`；账号前缀取不到时退回 `work-446.7M`。
-    static func make(prefix: String?, value: String, compact: Bool) -> String {
-        let body = prefix.map { "\($0)-\(value)" } ?? value
+    /// `work-总额度-446.7M`；没有标签时退回 `work-446.7M`。
+    static func make(label: String?, value: String, compact: Bool) -> String {
+        let body = label.map { "\($0)-\(value)" } ?? value
         return compact ? body : "work-\(body)"
     }
 }
@@ -694,7 +682,7 @@ final class MenuController: NSObject {
         menu.addItem(.separator())
         menu.addItem(refreshNow)
         menu.addItem(openConsole)
-        let compactItem = NSMenuItem(title: "紧凑标签（省略 work- 前缀）", action: #selector(toggleCompact), keyEquivalent: "t")
+        let compactItem = NSMenuItem(title: "紧凑标签（work-364m）", action: #selector(toggleCompact), keyEquivalent: "t")
         compactItem.target = self
         menu.addItem(compactItem)
         menu.addItem(updatedItem)
@@ -707,12 +695,19 @@ final class MenuController: NSObject {
         if let usage {
             overThreshold = thresholdMillion > 0 && Double(usage.total) >= thresholdMillion * 1_000_000
             let compact = NumberFormat.compact(usage.total)
-            setStatusTitle(menuBarTitle(compact), overThreshold: overThreshold)
-            headerItem.title = "今日 WorkBuddy（账号 \(usage.prefix)…） \(compact)"
+            let title = compactTitle
+                ? "work-\(NumberFormat.wholeM(usage.total))"
+                : "work-\(usage.label)-\(compact)"
+            setStatusTitle(title, overThreshold: overThreshold)
+            headerItem.title = "今日 WorkBuddy 三账号合计 \(compact)"
             updatedItem.title = "更新于 \(NumberFormat.time(usage.updatedAt))"
             statusItem.button?.toolTip = headerItem.title
         } else {
-            setStatusTitle(menuBarTitle(errorText == nil ? "…" : "—"), overThreshold: false)
+            let placeholder = errorText == nil ? "…" : "—"
+            setStatusTitle(
+                compactTitle ? "work-\(placeholder)" : "work-总额度-\(placeholder)",
+                overThreshold: false
+            )
             headerItem.title = errorText == nil ? "正在读取 WorkBuddy 用量…" : "无法读取 WorkBuddy 用量"
             updatedItem.title = ""
             statusItem.button?.toolTip = errorText ?? "正在读取 WorkBuddy 用量"
@@ -755,20 +750,14 @@ final class MenuController: NSObject {
     /// 同一天、同一账号、同一阈值只提醒一次；跨天或改阈值会重新提醒。
     private func maybeAlert(total: Int) {
         let day = DayKey.today()
-        let prefix = usage?.prefix ?? "-"
-        let key = "workbuddy|\(prefix)|\(day)|\(Int(thresholdMillion))"
+        let key = "workbuddy|all|\(day)|\(Int(thresholdMillion))"
         guard UserDefaults.standard.string(forKey: Keys.lastAlert) != key else { return }
         UserDefaults.standard.set(key, forKey: Keys.lastAlert)
 
-        let account = usage.map { "（账号 \($0.prefix)…）" } ?? ""
         notifier.show(
-            title: "今日 WorkBuddy\(account) Token 已达 \(NumberFormat.compact(total))",
+            title: "今日 WorkBuddy 三账号合计 Token 已达 \(NumberFormat.compact(total))",
             body: "提醒阈值 \(Int(thresholdMillion))M，可在菜单「提醒阈值」里调整或关闭。"
         )
-    }
-
-    private func menuBarTitle(_ value: String) -> String {
-        MenuTitle.make(prefix: usage?.prefix, value: value, compact: compactTitle)
     }
 
     @objc private func toggleCompact() {
@@ -810,23 +799,13 @@ final class MenuController: NSObject {
         guard !isFetching else { return }
         isFetching = true
         Task { [weak self] in
-            let outcome: Result<WorkbuddyUsageSnapshot, Error>
-            do {
-                outcome = .success(try await Task.detached(priority: .utility) {
-                    try WorkbuddyUsageProvider.fetch()
-                }.value)
-            } catch {
-                outcome = .failure(error)
-            }
+            let usage = await Task.detached(priority: .utility) {
+                WorkbuddyUsageProvider.fetch()
+            }.value
             guard let self else { return }
             self.isFetching = false
-            switch outcome {
-            case .success(let usage):
-                self.usage = usage
-                self.errorText = nil
-            case .failure(let error):
-                self.errorText = error.localizedDescription
-            }
+            self.usage = usage
+            self.errorText = nil
             self.render()
         }
     }
@@ -978,33 +957,23 @@ enum CLI {
                     "cacheHitRate": usage?.cacheHitRate.map { $0 } ?? NSNull(),
                 ]
             }
-            let local: WorkbuddyUsageSnapshot?
-            let localError: String?
-            do {
-                local = try WorkbuddyUsageProvider.fetch()
-                localError = nil
-            } catch {
-                local = nil
-                localError = error.localizedDescription
-            }
+            let local = WorkbuddyUsageProvider.fetch()
             let payload: [String: Any] = [
                 "date": snapshot.day,
                 "generatedAt": response.generatedAt ?? 0,
                 "all": snapshot.total(for: .all),
                 "sources": sources,
                 "thresholdChoices": ThresholdChoices.million,
-                // API 是三账号汇总，仅用于回归；标题取当前账号的本地日志统计。
+                // API 与本地扫描都应是三账号合计，两者用于交叉核对。
                 "workbuddy": snapshot.total(for: .workbuddy),
-                "accountPrefix": local?.prefix ?? NSNull(),
-                "localWorkbuddy": local?.total ?? NSNull(),
-                "localError": localError ?? NSNull(),
-                "title": local.map {
-                    MenuTitle.make(
-                        prefix: $0.prefix,
-                        value: NumberFormat.compact($0.total),
-                        compact: false
-                    )
-                } ?? NSNull(),
+                "scope": "workbuddy-all-accounts",
+                "localWorkbuddy": local.total,
+                "title": MenuTitle.make(
+                    label: local.label,
+                    value: NumberFormat.compact(local.total),
+                    compact: false
+                ),
+                "compactTitle": "work-\(NumberFormat.wholeM(local.total))",
             ]
             let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .prettyPrinted])
             FileHandle.standardOutput.write(data)

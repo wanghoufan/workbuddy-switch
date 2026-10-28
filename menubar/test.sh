@@ -83,14 +83,16 @@ if data["sources"]["workbuddy-ai"]["total"] != 5000000:
     failures.append("WorkBuddy 国际版应单独统计为 5000000")
 if data["thresholdChoices"] != [0, 30, 50, 90, 120, 150, 180, 300, 500]:
     failures.append(f"提醒阈值候选错误：{data['thresholdChoices']}")
-if data["accountPrefix"] != "999":
-    failures.append(f"当前账号前缀应为 999，实际 {data['accountPrefix']}")
+if data["scope"] != "workbuddy-all-accounts":
+    failures.append(f"统计口径应为 workbuddy-all-accounts，实际 {data['scope']}")
 if data["workbuddy"] != 12345678:
     failures.append(f"接口汇总 workbuddy 应为 12345678，实际 {data['workbuddy']}")
-if data["localWorkbuddy"] != 2000000:
-    failures.append(f"当前账号本地日志应为 2000000（含子代理、排除其他账号），实际 {data['localWorkbuddy']}")
-if data["title"] != "work-999-2.0M":
-    failures.append(f"标题应为 work-999-2.0M，实际 {data['title']}")
+if data["localWorkbuddy"] != 11000000:
+    failures.append(f"三账号本地日志应为 11000000（含子代理与其他账号），实际 {data['localWorkbuddy']}")
+if data["title"] != "work-总额度-11.0M":
+    failures.append(f"标题应为 work-总额度-11.0M，实际 {data['title']}")
+if data["compactTitle"] != "work-11m":
+    failures.append(f"紧凑标题应为 work-11m，实际 {data['compactTitle']}")
 if data["sources"]["workbuddy"]["input"] != 12000000:
     failures.append("workbuddy 输入应为 12000000")
 if abs(data["sources"]["workbuddy"]["cacheHitRate"] - 0.9166666666666666) > 1e-9:
@@ -102,7 +104,7 @@ if failures:
     for item in failures:
         print(" -", item)
     sys.exit(1)
-print("PASS 夹具解析：三产品总量、当前账号归属、本地日志口径、标题格式、缓存命中率均正确")
+print("PASS 夹具解析：三产品总量、三账号本地合计、常规/紧凑标题格式、缓存命中率均正确")
 '
 
 set +e

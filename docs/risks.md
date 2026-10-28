@@ -1,12 +1,13 @@
 # 风险与限制
 
-最后核对：2026-10-26 23:36（Asia/Shanghai）
+最后核对：2026-10-27 07:56（Asia/Shanghai）
 
-## 账号归属
+## 统计口径
 
-- 当前账号用量依赖 `/api/sessions/account` 的会话列表；若接口缺会话（新建/极旧/异常），本次统计会少算。
-- 仅扫 `~/.workbuddy`（CN）；国际版 `~/.workbuddy-ai`、CodeBuddy CLI、CodeBuddy IDE 不计入。用户切国际版时标题可能为 0/偏小。
-- WorkBuddy 日志目录共享；不要退回 `/api/token-stats` 的 workbuddy total 当单账号用量（三账号合计，约 98% 缓存）。
+- 当前菜单栏口径是**三个 WorkBuddy 账号合计**；不要给它加单个账号前缀，也不要按账号拆分显示。
+- 仅扫 `~/.workbuddy`（CN）；国际版 `~/.workbuddy-ai`、CodeBuddy CLI、CodeBuddy IDE 不计入。切国际版时标题会偏小/为 0。
+- 代码里保留了按 `/api/sessions/account` 的 `sessionIds` 过滤能力（单账号口径），但当前未启用；启用前先问用户。
+- 本地合计应与 `/api/token-stats` 的 workbuddy 今日 total 一致；不一致时先查日志扫描/去重，不要直接改用接口值糊弄。
 
 ## 性能
 

@@ -1,6 +1,6 @@
 # 踩坑与排查（agent.md）
 
-最后核对：2026-10-26 23:36（Asia/Shanghai）
+最后核对：2026-10-27 07:56（Asia/Shanghai）
 
 ## 菜单栏
 
@@ -12,11 +12,13 @@
 
 ## 统计口径
 
-- `/api/token-stats` 的 `workbuddy.total` 是三账号共享日志目录合计，且 input 含 cacheRead；446M/448M 不是当前账号用量。
-- 当前账号口径：`/api/accounts` → `current` → `/api/sessions/account` → 本地日志；子代理日志归父会话，复制/分叉会话按指纹去重。
+- 当前菜单栏口径 = 三个 WorkBuddy 账号今天合计，标题 `work-总额度-<M>`；不要再加 `199/133/166` 之类账号前缀。
+- 数据来源是 `~/.workbuddy/projects/**/*.jsonl` 今日文件，按 usage 记录求和；子代理日志归父会话，复制/分叉会话按指纹去重。
+- 单账号口径仍可用 `sessionIds` 过滤（`/api/sessions/account` 拿会话 id），但当前未启用；切换前先问用户。
+- `/api/token-stats` 的 `workbuddy.total` 也是三账号合计，且 input 含 cacheRead；历史大用量日可到 400M+，主要是缓存。
 - `days=1` 服务端不识别（range 只认 7/30/90），旧代码拿全量 daily 只取今天。
 - 日志行只有含 `"usage"` 才解析；usage 优先级 `message.usage` > `providerData.usage` > 顶层 `usage`；cache 字段有多个别名。
-- 阈值/告警按当前口径算；口径变化后要清旧的 `lastAlertKey`，否则当天可能不再提醒。
+- 阈值/告警按当前口径算；口径或标签变化后要清旧的 `lastAlertKey`，否则当天可能不再提醒。
 
 ## 构建 / 测试
 

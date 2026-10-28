@@ -1,8 +1,7 @@
 # WorkBuddy Token 菜单栏
 
-macOS 菜单栏常驻显示**当前 WorkBuddy 账号**的**今日** Token 用量，标题形如
-`work-<账号前缀>-57.5M`。数据来自本机服务的 `/api/accounts`、`/api/sessions/account`
-以及本机 WorkBuddy 日志；不另起端口、不写业务数据。
+macOS 菜单栏常驻显示**三个 WorkBuddy 账号合计**的**今日** Token 用量，标题形如
+`work-总额度-6.1M`。数据来自本机 WorkBuddy 日志；不另起端口、不写业务数据。
 
 ## 构建
 
@@ -18,7 +17,7 @@ sh menubar/build.sh
 sh menubar/test.sh
 ```
 
-覆盖：接口三产品总量与缓存命中率、当前账号前缀、本地日志统计（子代理归属、排除其他账号）、标题格式、提醒阈值候选；后端不可达时非零退出。
+覆盖：接口三产品总量与缓存命中率、三账号本地日志合计（含子代理）、标题格式、提醒阈值候选；后端不可达时非零退出。
 
 ## 登录自启（LaunchAgent）
 
@@ -36,37 +35,35 @@ zsh scripts/install-menubar-agent.sh --uninstall# 停用并移除 plist（保留
 
 | 项 | 说明 |
 |---|---|
-| 今日 WorkBuddy（账号 …） | 标题同一数字的落款 |
+| 今日 WorkBuddy 三账号合计 | 标题同一数字的落款 |
 | 刷新间隔 | 30 秒／1 分钟（默认）／5 分钟／10 分钟／手动刷新 |
 | 提醒阈值 | 关闭／30M／50M／90M（默认）／120M／150M／180M／300M／500M；达到后标题变红＋右上角卡片提醒 |
 | 立即刷新 / 打开主界面 | 手动刷新；打开 `http://127.0.0.1:57890/` |
-| 紧凑标签 | 省略 `work-` 前缀，只显示 `<账号前缀>-57.5M` |
+| 紧凑标签 | 只显示 `work-<整数>m`，例如 `work-364m` |
 | 更新于 | 最近一次刷新时间 |
 | 退出 | 结束进程（LaunchAgent 的 `KeepAlive` 仅在异常退出时拉起，正常退出不复活） |
 
-标题格式 `work-<当前账号手机号前三位>-<今日用量>`，例如 `work-<账号前缀>-57.5M`。
+常规标题 `work-总额度-<今日用量>`；紧凑模式 `work-<整数>m`（例如 `work-364m`）。
 刷新间隔、阈值、紧凑开关会写入 UserDefaults，重启后保持。
 
 ## 数字口径
 
-- 标题中间三位 = **当前 WorkBuddy 登录账号**的手机号前三位，
-  从本机服务 `/api/accounts` 的 `current` 匹配账号后取 `nickname` 前三位。
-  接口不可用时标题退回 `work-<用量>`，不会卡住刷新。
-- 标题数字 = **当前账号今天**的 WorkBuddy Token 总量：先用 `/api/sessions/account`
-  拿到该账号的会话 id，再扫本机 `~/.workbuddy/projects/**/*.jsonl`，只统计这些会话
-  （子代理日志向上归属到父会话）中**今天**的 usage 记录。
+- 标题中间固定为 **总额度**，表示三个 WorkBuddy 账号的今日合计，不再显示当前账号前缀。
+- 标题数字 = **三个账号今天**的 WorkBuddy Token 总量：扫本机
+  `~/.workbuddy/projects/**/*.jsonl` 中**今天**修改过的文件，统计其中今天的 usage 记录
+  （子代理日志归父会话）。
 - 口径与服务端一致：`input` 已含缓存读取，再追加 output 与 cache write；
   复制/分叉会话按 `(时间戳, input, output, cacheRead, cacheWrite, model)` 去重，避免重复计数。
-- 不再使用 `/api/token-stats` 的 `workbuddy` 汇总数（那是三个账号共同日志目录的合计，
-  会显示成 400M+）；菜单栏只显示当前账号这一项。WorkBuddy 国际版日志不在此统计内。
+- 代码里保留了按会话 id 过滤的能力，以后若要恢复「只看当前账号」可直接启用；
+  当前菜单栏口径是三个账号合计。WorkBuddy 国际版日志不在此统计内。
 
 ## 阈值提醒
 
 - 阈值为**今日 Token 百万数**（`alertThresholdMillion`，0＝关闭），默认 **90M**。
-  当前账号今天约 57M，120M / 180M 阈值都在正常范围；300M / 500M 保留给用量大的日子。
+  三账号合计今天约 6M（07:50），120M / 180M 阈值都在正常范围；300M / 500M 保留给用量大的日子。
 - 达到阈值：菜单栏标题变红；同时在鼠标所在屏幕的右上角弹一张通知卡片（无边框 `NSPanel`，不抢焦点），
   **20 秒自动淡出**，点击可立即关闭。
-- 同一天／同一账号／同一阈值只提醒一次（`lastAlertKey`）；跨天、改阈值、切账号会重新提醒一次。
+- 同一天／同一合计口径／同一阈值只提醒一次（`lastAlertKey`）；跨天、改阈值会重新提醒一次。
 - 想立刻验证：`defaults write com.local.wb-token.menubar alertThresholdMillion -float 1` 后
   `launchctl kickstart -k gui/$(id -u)/com.local.wb-token.menubar`，验证完把阈值写回 90。
 

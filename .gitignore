@@ -59,3 +59,21 @@ npm/platform/*/bin/
 # 本机预编译后端二进制与依赖目录（不随仓库分发）
 bin/
 .dev-backend/
+# 治理母版副本与旧版备份（不入库）
+*.旧版-*
+scripts/_cb-*.py
+scripts/_inject-agents-block.py
+scripts/orca-*
+scripts/restore-framework.sh
+scripts/install-governance-hooks.sh
+scripts/pre-commit-guard.sh
+scripts/check-dispatch-output.sh
+scripts/check-product-review.sh
+scripts/codebuddy-auto.sh
+scripts/migration-status.sh
+scripts/detect-client.sh
+scripts/check-channel-preflight.sh
+docs/model/NEXT-TASKS.md
+docs/model/TASK-MANAGER-QUALIFICATION.md
+docs/prompts/
+docs/templates/
